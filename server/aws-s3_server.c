@@ -19,7 +19,7 @@ Ejecutar: ./aws-s3_server
 #define MAX_FREE      10000
 
 typedef struct {
-    char     magic[4];     // "BKT1" para identificar el formato
+    char     magic[4];     // firma "BKT1" para archivos binarios
     uint32_t max_entries;
     uint32_t num_entries;  // entradas de directorio ocupadas
     uint32_t max_free;
@@ -28,10 +28,10 @@ typedef struct {
 } BucketHeader;
 
 typedef struct {
-    char     key[MAX_KEY_LEN];  // clave/prefijo completo, "" si está libre
-    uint64_t offset;            // byte donde empieza el contenido
-    uint64_t size;               // tamaño en bytes del objeto
-    int      used;               // 1 = slot ocupado, 0 = libre
+    char     key[MAX_KEY_LEN];      // clave/prefijo completo, "" si está libre
+    uint64_t offset;                // byte donde empieza el contenido
+    uint64_t size;                  // tamaño en bytes del objeto
+    int      used;                  // 1 = slot ocupado, 0 = libre
 } DirEntry;
 
 typedef struct {
@@ -53,6 +53,12 @@ static uint64_t compute_data_start(void) {
 }
 
 int bucket_create(const char *bucket_name) {
+    /*
+    * bucket_create – Crea un bucket nuevo, genera el header y asigna memoria
+    *
+    * @param bucket_name   nombre del bucket
+    * @return 0: Sin errores
+    */
     mkdir(BUCKETS_DIR, 0755); // si ya existe, mkdir falla pero no es un error fatal
 
     char path[512];
@@ -183,8 +189,16 @@ static uint64_t allocate_space(FILE *f, BucketHeader *h, uint64_t size, int *fre
     return data_end_offset(f, h);
 }
 
-int bucket_put_object(const char *bucket_name, const char *key,
-                       const unsigned char *data, uint64_t size) {
+int bucket_put_object(const char *bucket_name, const char *key, const unsigned char *data, uint64_t size) {
+    /*
+    * bucket_put_objetct – insertar un objeto en el bucket
+    *
+    * @param bucket_name    nombre del bucket
+    * @param key            identificador del object
+    * @param data           datos del objeto
+    * @param size           tamaño del objeto
+    * @return 0: Sin errores
+    */
     FILE *f = bucket_open(bucket_name, "r+b");
     if (!f) return -1;
 
@@ -193,6 +207,7 @@ int bucket_put_object(const char *bucket_name, const char *key,
 
     int idx = find_entry_by_key(f, &header, key);
 
+    //si el bucket ya tiene objetos, agregar nuevo id al final
     if (idx >= 0) {
         DirEntry old; bucket_read_entry(f, idx, &old);
 
@@ -222,10 +237,12 @@ int bucket_put_object(const char *bucket_name, const char *key,
         return 0;
     }
 
+    //si el bucket no tiene espacios libres ==> error
     int new_idx = find_free_dir_slot(f, &header);
     if (new_idx < 0) {
         fprintf(stderr, "Error: directorio del bucket lleno\n");
-        fclose(f); return -1;
+        fclose(f); 
+        return -1;
     }
 
     int free_idx;
@@ -249,6 +266,14 @@ int bucket_put_object(const char *bucket_name, const char *key,
 }
 
 unsigned char *bucket_get_object(const char *bucket_name, const char *key, uint64_t *out_size) {
+    /*
+    * bucket_get_object – Busca y retorna el contenido del object
+    *
+    * @param bucket_name    nombre del bucket donde está el object
+    * @param key            identificador del object
+    * @param out_size       (salida) tamaño del object
+    * @return               data del objeto
+    */
     FILE *f = bucket_open(bucket_name, "rb");
     if (!f) return NULL;
 
@@ -274,6 +299,13 @@ unsigned char *bucket_get_object(const char *bucket_name, const char *key, uint6
 }
 
 int bucket_delete_object(const char *bucket_name, const char *key) {
+    /*
+    * bucket_delete_object – Elimina un object del bucket
+    *
+    * @param bucket_name    nombre del bucket
+    * @param key            identificador del object
+    * @return 0: Sin errores
+    */
     FILE *f = bucket_open(bucket_name, "r+b");
     if (!f) return -1;
 
@@ -298,7 +330,13 @@ int bucket_delete_object(const char *bucket_name, const char *key) {
     return 0;
 }
 
-void bucket_list_buckets(void) {
+void list_buckets(void) {
+    /*
+    * list_buckets – Lista todos los buckets
+    *
+    * @param bucket_name    nombre del bucket
+    * @param key            identificador del object
+    */
     DIR *d = opendir(BUCKETS_DIR);
     if (!d) { perror("opendir"); return; }
 
@@ -313,6 +351,12 @@ void bucket_list_buckets(void) {
 }
 
 void bucket_list_objects(const char *bucket_name, const char *prefix) {
+    /*
+    * bucket_list_objects – Lista de todos los objetos del bucket
+    *
+    * @param bucket_name   nombre del bucket
+    * @param prefix        (opcional) filtra todos los objects que empiecen con prefix
+    */
     FILE *f = bucket_open(bucket_name, "rb");
     if (!f) return;
 
@@ -331,6 +375,14 @@ void bucket_list_objects(const char *bucket_name, const char *prefix) {
 }
 
 int bucket_remove(const char *bucket_name, int force) {
+        /*
+    * bucket_delete_object – Elimina un bucket
+    *
+    * @param bucket_name    nombre del bucket
+    * @param force          (opcional) 1: forzar borrado en caso que el bucket no esté vacío
+    * @return               0: Sin errores
+    *                       -1: salida cone rror
+    */
     FILE *f = bucket_open(bucket_name, "rb");
     if (!f) return -1;
 
