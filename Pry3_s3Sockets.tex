@@ -1,0 +1,328 @@
+\documentclass[12pt, letterpaper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+
+\usepackage[top=2.5cm, bottom=2.5cm, left=3cm, right=3cm]{geometry}
+
+\usepackage[hidelinks]{hyperref}
+
+\usepackage{tocloft}
+
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{orange},
+    breaklines=true,
+    frame=single,
+    language=C
+}
+
+\usepackage{setspace}
+\onehalfspacing %espaciado 1.5
+
+\begin{document}
+
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+    {\Large \textbf{Tecnológico de Costa Rica}}\\[0.5cm]
+    {\large Principios de Sistemas Operativos [IC-6600]}\\[0.3cm]
+    {\large Sede: Cartago}\\[0.3cm]
+    {\large Profesor: Armando Arce Orozco}\\[2cm]
+
+    {\LARGE \textbf{Proyecto 3: Sistema de archivos S3}}\\[2cm]
+
+    {\large \textbf{Integrantes:}}\\[0.3cm]
+    {\large Fernando Andrés Sánchez Hidalgo \hspace{0.5cm} [2022218688]}\\[0.2cm]
+    {\large Kevin Espinoza Solano \hspace{0.5cm} [2023055841]}\\[2cm]
+
+    {\large I Semestre 2026}\\[0.5cm]
+
+    {\large \textbf{Repositorio:}}\\[0.2cm]
+    \href{https://github.com/fash2110/OS-3_2026}{\texttt{https://github.com/fash2110/OS-3\_2026}}
+
+    \vfill
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+\section{Introducción}
+El proyecto tiene como objetivo simular un sistema de archivos basado en buckets similar al S3 (Simple Storage Service) de AWS. Para esto se implementan dos programas, un servidor que maneja operaciones de buckets y sus objetos (Creación, Modificación, Obtención y Eliminación) y recibe comandos del programa cliente. El programa cliente obtiene comandos del usuario por medio de la consola y los traslada para que el servidor realice las operaciones del sistema de archivos.
+
+\section{Descripción del problema}
+Para la implementación del proyecto, se generan dos programas escritos en C
+\begin{itemize}
+    \item Servidor: Enviar/recibir mensajes al/del cliente y realizar operaciones en sistema de archivos
+    \item Cliente: Interfaz del usuario, envíar y recibir mensajes al servidor
+\end{itemize}
+La estrategia del programa servidor:
+\begin{enumerate}
+    \item Iniciar el servidor TCP en el puerto 8080 y quedar a la espera 
+          de conexiones entrantes mediante \texttt{accept()}.
+    \item Al conectarse un cliente, recibir la cabecera fija del mensaje 
+          (\texttt{MsgHeader}) que indica el tipo de comando, flags y 
+          longitudes de los campos.
+    \item Leer secuencialmente del socket: el nombre del bucket, la clave 
+          del objeto (\textit{key}), una segunda clave opcional (\textit{key2}) 
+          y los datos binarios adjuntos, si los hay.
+    \item Determinar el comando solicitado y despacharlo al manejador 
+          correspondiente:
+    \begin{itemize}
+        \item \texttt{CMD\_LS}: listar buckets o el contenido de un bucket 
+              filtrando por prefijo.
+        \item \texttt{CMD\_MB}: crear un nuevo archivo \texttt{.bkt} que 
+              representa el bucket.
+        \item \texttt{CMD\_PUT}: almacenar un objeto en el bucket, 
+              reutilizando espacio libre si existe o escribiendo al final 
+              del archivo.
+        \item \texttt{CMD\_GET}: recuperar el contenido de un objeto del 
+              bucket y enviarlo al cliente.
+        \item \texttt{CMD\_MV}: copiar el objeto al destino y eliminar el 
+              original.
+        \item \texttt{CMD\_RM}: eliminar uno o varios objetos, opcionalmente 
+              de forma recursiva por prefijo.
+        \item \texttt{CMD\_SYNC}: confirmar disponibilidad para recibir 
+              múltiples objetos vía \texttt{CMD\_PUT}.
+        \item \texttt{CMD\_RB}: eliminar un bucket, con verificación de 
+              que esté vacío a menos que se use el flag \texttt{--force}.
+    \end{itemize}
+    \item Enviar al cliente una respuesta con cabecera \texttt{MsgHeader}, 
+          indicando \texttt{RESP\_OK}, \texttt{RESP\_ERROR}, 
+          \texttt{RESP\_DATA} o \texttt{RESP\_LIST} según corresponda, 
+          junto con datos adjuntos si la operación lo requiere.
+    \item Regresar al paso 2 para atender el siguiente comando del mismo 
+          cliente, hasta que este cierre la conexión.
+\end{enumerate}
+Estrategia del programa cliente:
+\begin{enumerate}
+    \item TODO %TODO
+\end{enumerate}
+
+\section{Definición de estructuras de datos}
+\subsection{Structs}
+\subsubsection{Servidor}
+\begin{lstlisting}
+typedef struct __attribute__((packed)) {
+    uint8_t  cmd;          /* tipo de comando / respuesta  */
+    uint8_t  flags;        /* bits auxiliares (--recursive=1, --force=2, --delete=4) */
+    uint16_t bucket_len;   /* longitud del nombre del bucket (sin '\0') */
+    uint16_t key_len;      /* longitud de la clave/prefijo   (sin '\0') */
+    uint16_t key2_len;     /* clave destino en mv            (sin '\0') */
+    uint64_t data_len;     /* longitud de los datos adjuntos */
+} msgHeader;
+\end{lstlisting}
+Cabecera que precede a todos los mensajes recibidos o emitidos por el servidor, contiene información como el tipo de comando enviado, banderas auxiliares, longitud del identificador del bucket, longitud del nombre de los objetos incluidos y longitud de los datos. \\
+
+\begin{lstlisting}
+typedef struct {
+    char     magic[4];     // firma "BKT1" para archivos binarios
+    uint32_t max_entries;
+    uint32_t num_entries;  // entradas de directorio ocupadas
+    uint32_t max_free;
+    uint32_t num_free;     // entradas de free-list ocupadas
+    uint64_t data_start;   // offset donde empieza la zona de datos
+} bucketHeader;
+\end{lstlisting}
+Cabecera de cada bucket para gestión de sus objetos correspondientes. Todo bucket empieza con la firma \texttt{BKT1} por ser un archivo binario. En la cabecera se mantiene información como la capacidad máxima del bucket, cantidad de entradas ocupadas, capacidad máxima de espacios libres, cantidad de espacios libres actuales y un offset del inicio del espacio de datos calculado con \texttt{data\_start=sizeof(BucketHeader) + MAX\_ENTRIES \times sizeof(DirEntry) + MAX\_FREE \times sizeof(FreeBlock)} para garantizar que los metadatos y contenido del bucket no contengan intersección. \\
+
+\begin{lstlisting}
+typedef struct {
+    char     key[MAX_KEY_LEN];      // clave/prefijo completo, "" si está libre
+    uint64_t offset;                // byte donde empieza el contenido
+    uint64_t size;                  // tamaño en bytes del objeto
+    int      used;                  // 1 = slot ocupado, 0 = libre
+} dirEntry;
+\end{lstlisting}
+Entrada de directorio de un objeto en el bucket para búsqueda directa del contenido, se tiene un campo para el identificador del objeto (ej: \texttt{fotos/vacaciones/2024.jpg} o "" si es un espacio libre), un offset que representa la distancia desde el inicio del archivo hasta el primer byte del contenido para búsqueda con \texttt{fseek()}, el tamaño del contenido del objeto y un bit para definir si es un campo libre u ocpudao. \\
+
+\begin{lstlisting}
+typedef struct {
+    uint64_t offset;
+    uint64_t size;
+    int      used;   // 1 = hueco libre válido, 0 = slot de la lista sin usar
+} freeBlock;
+\end{lstlisting}
+Espacio libre en el contenido del bucket, contiene el offset para su búsqueda directa en la zona de datos, tamaño del espacio libre para identificar si es lo suficientemente grande para el contenido que lo va a reemplazar y un bit que define si es un espacio válido u ocupado. \\
+
+\subsection{Variables globales}
+\begin{itemize}
+    \item MAX\_KEY\_LEN: Tamaño máximo para nombre de un object
+    \item MAX\_ENTRIES: Capacidad máxima de un bucket
+    \item MAX\_FREE: Capacidad máxima del espacio libre
+    \item BUCKETS\_DIR: Directorio donde se almacenan los bucket (\texttt{./buckets})
+    \item SERVER\_PORT: Puerto para recibir mensajes (\texttt{8080})
+    \item BACKLOG: Cantidad de clientes que permite para operaciones secuenciales (\textbf{10})
+    \item enum de comandos de mensajes
+    \begin{itemize}
+        \item CMD\_LS: 1
+        \item CMD\_MB: 2
+        \item CMD\_PUT: 3
+        \item CMD\_GET: 4
+        \item CMD\_MV: 5
+        \item CMD\_RM: 6
+        \item CMD\_SYNC: 7
+        \item CMD\_RB: 8
+    \end{itemize}
+    \item Códigos de respuesta
+    \begin{itemize}
+        \item RESP\_OK: 100
+        \item RESP\_ERROR: 101
+        \item RESP\_DATA: 102
+        \item RESP\_LIST: 103
+    \end{itemize}
+    \item Banderas auxiliares
+    \begin{itemize}
+        \item FLAG\_RECURSIVE: 0x01
+        \item FLAG\_FORCE: 0x02
+        \item FLAG\_DELETE: 0x04
+    \end{itemize}
+\end{itemize}
+
+\section{Componentes principales}
+
+\subsection*{Servidor}
+\begin{itemize}
+    \item \texttt{main(void) $\to$ int}
+        \begin{itemize}
+            \item Inicializa el socket TCP en el puerto 8080
+            \item Queda en espera de conexiones entrantes y delega cada 
+                  cliente a \texttt{handle\_client()}
+        \end{itemize}
+    \item \texttt{handle\_client(int client\_fd) $\to$ void}
+        \begin{itemize}
+            \item Componente central del servidor
+            \item Recibe la cabecera \texttt{MsgHeader} y los campos del 
+                  mensaje (bucket, key, key2, datos)
+            \item Despacha el comando al manejador correspondiente según 
+                  el campo \texttt{cmd}
+            \item Mantiene el ciclo de atención hasta que el cliente 
+                  cierra la conexión
+        \end{itemize}
+
+    \subsection*{Manejadores de comandos}
+    \item \texttt{handle\_ls(int fd, char* bucket, char* prefix) $\to$ void}
+        \begin{itemize}
+            \item Lista todos los buckets disponibles si \texttt{bucket} 
+                  está vacío
+            \item Lista los objetos de un bucket filtrando por prefijo
+        \end{itemize}
+    \item \texttt{handle\_mb(int fd, char* bucket) $\to$ void}
+        \begin{itemize}
+            \item Crea un nuevo archivo \texttt{.bkt} con su cabecera, 
+                  directorio y lista de espacios libres inicializados
+        \end{itemize}
+    \item \texttt{handle\_put(int fd, char* bucket, char* key, 
+          unsigned char* data, uint64\_t data\_len) $\to$ void}
+        \begin{itemize}
+            \item Almacena un objeto en el bucket
+            \item Reutiliza un \texttt{FreeBlock} disponible mediante 
+                  \textit{first-fit}, o escribe al final del archivo
+            \item Crea el bucket automáticamente si no existe
+        \end{itemize}
+    \item \texttt{handle\_get(int fd, char* bucket, char* key) $\to$ void}
+        \begin{itemize}
+            \item Recupera el contenido de un objeto del bucket y lo 
+                  envía al cliente como \texttt{RESP\_DATA}
+        \end{itemize}
+    \item \texttt{handle\_mv(int fd, char* bucket\_src, char* key\_src, 
+          char* bucket\_dst, char* key\_dst) $\to$ void}
+        \begin{itemize}
+            \item Copia el objeto al bucket destino y elimina el original
+            \item Crea el bucket destino automáticamente si no existe
+        \end{itemize}
+    \item \texttt{handle\_rm(int fd, char* bucket, char* key, 
+          int recursive) $\to$ void}
+        \begin{itemize}
+            \item Elimina un objeto específico o, en modo recursivo, 
+                  todos los objetos cuya clave inicie con el prefijo dado
+        \end{itemize}
+    \item \texttt{handle\_rb(int fd, char* bucket, int force) $\to$ void}
+        \begin{itemize}
+            \item Elimina un bucket verificando que esté vacío
+            \item Con \texttt{force=1} elimina el bucket aunque contenga 
+                  objetos
+        \end{itemize}
+
+    \subsection*{Gestión de buckets}
+    \item \texttt{bucket\_create(char* bucket\_name) $\to$ int}
+        \begin{itemize}
+            \item Crea el archivo \texttt{.bkt} e inicializa el 
+                  \texttt{BucketHeader}, el arreglo de \texttt{DirEntry} 
+                  y la lista de \texttt{FreeBlock}
+        \end{itemize}
+    \item \texttt{bucket\_put\_object(char* bucket, char* key, 
+          unsigned char* data, uint64\_t size) $\to$ int}
+        \begin{itemize}
+            \item Busca si el objeto ya existe para reemplazarlo
+            \item Aplica el algoritmo \textit{first-fit} sobre la lista 
+                  de \texttt{FreeBlock} para asignar espacio
+            \item Actualiza la \texttt{DirEntry} correspondiente y la 
+                  lista de espacios libres
+        \end{itemize}
+    \item \texttt{bucket\_get\_object(char* bucket, char* key, 
+          uint64\_t* out\_size) $\to$ unsigned char*}
+        \begin{itemize}
+            \item Localiza el objeto por su clave en el directorio
+            \item Retorna un buffer con el contenido; el llamador es 
+                  responsable de liberar la memoria con \texttt{free()}
+        \end{itemize}
+    \item \texttt{bucket\_delete\_object(char* bucket, char* key) $\to$ int}
+        \begin{itemize}
+            \item Marca la \texttt{DirEntry} como libre (\texttt{used=0})
+            \item Registra el espacio liberado como un nuevo 
+                  \texttt{FreeBlock}
+        \end{itemize}
+    \item \texttt{bucket\_remove(char* bucket, int force) $\to$ int}
+        \begin{itemize}
+            \item Verifica si el bucket contiene objetos antes de 
+                  eliminarlo
+            \item Elimina el archivo \texttt{.bkt} del sistema de archivos
+        \end{itemize}
+
+    \subsection*{Helpers de red}
+    \item \texttt{net\_send\_all(int fd, void* buf, size\_t len) $\to$ int}
+        \begin{itemize}
+            \item Garantiza el envío completo de \texttt{len} bytes al 
+                  socket, reintentando si \texttt{send()} transmite menos 
+                  bytes de los esperados
+        \end{itemize}
+    \item \texttt{net\_recv\_all(int fd, void* buf, size\_t len) $\to$ int}
+        \begin{itemize}
+            \item Garantiza la recepción completa de \texttt{len} bytes 
+                  del socket, reintentando si \texttt{recv()} entrega 
+                  menos bytes de los esperados
+        \end{itemize}
+    \item \texttt{send\_response(int fd, uint8\_t type, char* msg) $\to$ void}
+        \begin{itemize}
+            \item Envía una respuesta simple al cliente con cabecera 
+                  \texttt{MsgHeader} y un mensaje de texto opcional
+        \end{itemize}
+    \item \texttt{send\_data\_response(int fd, uint8\_t type, 
+          void* data, uint64\_t len) $\to$ void}
+        \begin{itemize}
+            \item Envía una respuesta con datos binarios adjuntos, 
+                  utilizada en operaciones \texttt{GET} y \texttt{LS}
+        \end{itemize}
+\end{itemize}
+
+\section{Pruebas}
+TODO
+
+\subsection{Metodología}
+TODO
+
+\subsection{Resultados}
+TODO
+
+\section{Conclusiones}
+TODO
+
+\end{document}

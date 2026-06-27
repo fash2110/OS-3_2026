@@ -31,7 +31,7 @@ Ejecutar: ./aws-s3_server
 /* ============================================================
  *  Protocolo de mensajes (cliente ↔ servidor)
  *
- *  Cada mensaje comienza con un MsgHeader fijo.
+ *  Cada mensaje comienza con un msgHeader fijo.
  *  Los campos de longitud permiten transmitir datos binarios.
  *
  *  Tipos de comando (cmd):
@@ -76,7 +76,7 @@ typedef struct __attribute__((packed)) {
     uint16_t key_len;      /* longitud de la clave/prefijo   (sin '\0') */
     uint16_t key2_len;     /* clave destino en mv            (sin '\0') */
     uint64_t data_len;     /* longitud de los datos adjuntos */
-} MsgHeader;
+} msgHeader;
 
 /* ============================================================
  *  Estructuras del bucket
@@ -88,20 +88,20 @@ typedef struct {
     uint32_t max_free;
     uint32_t num_free;     // entradas de free-list ocupadas
     uint64_t data_start;   // offset donde empieza la zona de datos
-} BucketHeader;
+} bucketHeader;
 
 typedef struct {
     char     key[MAX_KEY_LEN];      // clave/prefijo completo, "" si está libre
     uint64_t offset;                // byte donde empieza el contenido
     uint64_t size;                  // tamaño en bytes del objeto
     int      used;                  // 1 = slot ocupado, 0 = libre
-} DirEntry;
+} dirEntry;
 
 typedef struct {
     uint64_t offset;
     uint64_t size;
     int      used;   // 1 = hueco libre válido, 0 = slot de la lista sin usar
-} FreeBlock;
+} freeBlock;
 
 /* ============================================================
  *  Helpers de E/S segura sobre sockets
@@ -152,7 +152,7 @@ static int net_recv_all(int fd, void *buf, size_t len) {
  * @param msg     mensaje de texto (puede ser NULL)
  */
 static void send_response(int fd, uint8_t type, const char *msg) {
-    MsgHeader h;
+    msgHeader h;
     memset(&h, 0, sizeof(h));
     h.cmd      = type;
     h.data_len = msg ? (uint64_t)strlen(msg) : 0;
@@ -169,7 +169,7 @@ static void send_response(int fd, uint8_t type, const char *msg) {
  * @param data_len  tamaño del contenido
  */
 static void send_data_response(int fd, uint8_t type, const void *data, uint64_t data_len) {
-    MsgHeader h;
+    msgHeader h;
     memset(&h, 0, sizeof(h));
     h.cmd      = type;
     h.data_len = data_len;
@@ -187,17 +187,17 @@ static void bucket_path(const char *bucket_name, char *out, size_t out_size) {
 }
 
 static uint64_t compute_data_start(void) {
-    return sizeof(BucketHeader)
-         + (uint64_t)MAX_ENTRIES * sizeof(DirEntry)
-         + (uint64_t)MAX_FREE    * sizeof(FreeBlock);
+    return sizeof(bucketHeader)
+         + (uint64_t)MAX_ENTRIES * sizeof(dirEntry)
+         + (uint64_t)MAX_FREE    * sizeof(freeBlock);
 }
 
 /*
-    * bucket_create – Crea un bucket nuevo, genera el header y asigna memoria
-    *
-    * @param bucket_name   nombre del bucket
-    * @return 0: Sin errores
-    */
+* bucket_create – Crea un bucket nuevo, genera el header y asigna memoria
+*
+* @param bucket_name   nombre del bucket
+* @return 0: Sin errores
+*/
 int bucket_create(const char *bucket_name) {
     mkdir(BUCKETS_DIR, 0755); // si ya existe, mkdir falla pero no es un error fatal
 
@@ -212,7 +212,7 @@ int bucket_create(const char *bucket_name) {
     FILE *f = fopen(path, "wb");
     if (!f) { perror("fopen"); return -1; }
 
-    BucketHeader header;
+    bucketHeader header;
     memset(&header, 0, sizeof(header));
     memcpy(header.magic, "BKT1", 4);
     header.max_entries = MAX_ENTRIES;
@@ -220,10 +220,10 @@ int bucket_create(const char *bucket_name) {
     header.data_start = compute_data_start();
     fwrite(&header, sizeof(header), 1, f);
 
-    DirEntry empty_entry; memset(&empty_entry, 0, sizeof(empty_entry));
+    dirEntry empty_entry; memset(&empty_entry, 0, sizeof(empty_entry));
     for (uint32_t i = 0; i < MAX_ENTRIES; i++) fwrite(&empty_entry, sizeof(empty_entry), 1, f);
 
-    FreeBlock empty_free; memset(&empty_free, 0, sizeof(empty_free));
+    freeBlock empty_free; memset(&empty_free, 0, sizeof(empty_free));
     for (uint32_t i = 0; i < MAX_FREE; i++) fwrite(&empty_free, sizeof(empty_free), 1, f);
 
     fclose(f);
@@ -239,9 +239,9 @@ FILE *bucket_open(const char *bucket_name, const char *mode) {
     return f;
 }
 
-static int bucket_read_header(FILE *f, BucketHeader *header) {
+static int bucket_read_header(FILE *f, bucketHeader *header) {
     fseek(f, 0, SEEK_SET);
-    if (fread(header, sizeof(BucketHeader), 1, f) != 1) return -1;
+    if (fread(header, sizeof(bucketHeader), 1, f) != 1) return -1;
     if (memcmp(header->magic, "BKT1", 4) != 0) {
         fprintf(stderr, "Error: formato de bucket inválido\n");
         return -1;
@@ -249,55 +249,55 @@ static int bucket_read_header(FILE *f, BucketHeader *header) {
     return 0;
 }
 
-static int bucket_write_header(FILE *f, BucketHeader *header) {
+static int bucket_write_header(FILE *f, bucketHeader *header) {
     fseek(f, 0, SEEK_SET);
-    return fwrite(header, sizeof(BucketHeader), 1, f) == 1 ? 0 : -1;
+    return fwrite(header, sizeof(bucketHeader), 1, f) == 1 ? 0 : -1;
 }
 
 static long dir_entry_offset(int i) {
-    return (long)sizeof(BucketHeader) + (long)i * sizeof(DirEntry);
+    return (long)sizeof(bucketHeader) + (long)i * sizeof(dirEntry);
 }
 static long free_block_offset(int i) {
-    return (long)sizeof(BucketHeader) + (long)MAX_ENTRIES * sizeof(DirEntry)
-         + (long)i * sizeof(FreeBlock);
+    return (long)sizeof(bucketHeader) + (long)MAX_ENTRIES * sizeof(dirEntry)
+         + (long)i * sizeof(freeBlock);
 }
 
-static int bucket_read_entry(FILE *f, int i, DirEntry *e) {
+static int bucket_read_entry(FILE *f, int i, dirEntry *e) {
     fseek(f, dir_entry_offset(i), SEEK_SET);
-    return fread(e, sizeof(DirEntry), 1, f) == 1 ? 0 : -1;
+    return fread(e, sizeof(dirEntry), 1, f) == 1 ? 0 : -1;
 }
-static int bucket_write_entry(FILE *f, int i, DirEntry *e) {
+static int bucket_write_entry(FILE *f, int i, dirEntry *e) {
     fseek(f, dir_entry_offset(i), SEEK_SET);
-    return fwrite(e, sizeof(DirEntry), 1, f) == 1 ? 0 : -1;
+    return fwrite(e, sizeof(dirEntry), 1, f) == 1 ? 0 : -1;
 }
-static int bucket_read_free(FILE *f, int i, FreeBlock *b) {
+static int bucket_read_free(FILE *f, int i, freeBlock *b) {
     fseek(f, free_block_offset(i), SEEK_SET);
-    return fread(b, sizeof(FreeBlock), 1, f) == 1 ? 0 : -1;
+    return fread(b, sizeof(freeBlock), 1, f) == 1 ? 0 : -1;
 }
-static int bucket_write_free(FILE *f, int i, FreeBlock *b) {
+static int bucket_write_free(FILE *f, int i, freeBlock *b) {
     fseek(f, free_block_offset(i), SEEK_SET);
-    return fwrite(b, sizeof(FreeBlock), 1, f) == 1 ? 0 : -1;
+    return fwrite(b, sizeof(freeBlock), 1, f) == 1 ? 0 : -1;
 }
 
-static int find_entry_by_key(FILE *f, BucketHeader *h, const char *key) {
+static int find_entry_by_key(FILE *f, bucketHeader *h, const char *key) {
     for (uint32_t i = 0; i < h->max_entries; i++) {
-        DirEntry e; bucket_read_entry(f, i, &e);
+        dirEntry e; bucket_read_entry(f, i, &e);
         if (e.used && strcmp(e.key, key) == 0) return (int)i;
     }
     return -1;
 }
 
-static int find_free_dir_slot(FILE *f, BucketHeader *h) {
+static int find_free_dir_slot(FILE *f, bucketHeader *h) {
     for (uint32_t i = 0; i < h->max_entries; i++) {
-        DirEntry e; bucket_read_entry(f, i, &e);
+        dirEntry e; bucket_read_entry(f, i, &e);
         if (!e.used) return (int)i;
     }
     return -1;
 }
 
-static int add_free_block(FILE *f, BucketHeader *h, uint64_t offset, uint64_t size) {
+static int add_free_block(FILE *f, bucketHeader *h, uint64_t offset, uint64_t size) {
     for (uint32_t i = 0; i < h->max_free; i++) {
-        FreeBlock b; bucket_read_free(f, i, &b);
+        freeBlock b; bucket_read_free(f, i, &b);
         if (!b.used) {
             b.offset = offset; b.size = size; b.used = 1;
             bucket_write_free(f, i, &b);
@@ -307,10 +307,10 @@ static int add_free_block(FILE *f, BucketHeader *h, uint64_t offset, uint64_t si
     return -1; // free list llena, caso límite a documentar
 }
 
-static uint64_t data_end_offset(FILE *f, BucketHeader *h) {
+static uint64_t data_end_offset(FILE *f, bucketHeader *h) {
     uint64_t max_end = h->data_start;
     for (uint32_t i = 0; i < h->max_entries; i++) {
-        DirEntry e; bucket_read_entry(f, i, &e);
+        dirEntry e; bucket_read_entry(f, i, &e);
         if (e.used) {
             uint64_t end = e.offset + e.size;
             if (end > max_end) max_end = end;
@@ -320,38 +320,38 @@ static uint64_t data_end_offset(FILE *f, BucketHeader *h) {
 }
 
 // first-fit: primer hueco libre que ajuste, o el final del archivo
-static uint64_t allocate_space(FILE *f, BucketHeader *h, uint64_t size, int *free_idx) {
+static uint64_t allocate_space(FILE *f, bucketHeader *h, uint64_t size, int *free_idx) {
     *free_idx = -1;
     for (uint32_t i = 0; i < h->max_free; i++) {
-        FreeBlock b; bucket_read_free(f, i, &b);
+        freeBlock b; bucket_read_free(f, i, &b);
         if (b.used && b.size >= size) { *free_idx = (int)i; return b.offset; }
     }
     return data_end_offset(f, h);
 }
 
-    /*
-    * bucket_put_objetct – insertar un objeto en el bucket
-    *
-    * @param bucket_name    nombre del bucket
-    * @param key            identificador del object
-    * @param data           datos del objeto
-    * @param size           tamaño del objeto
-    * @return 0: Sin errores
-    */
+/*
+* bucket_put_objetct – insertar un objeto en el bucket
+*
+* @param bucket_name    nombre del bucket
+* @param key            identificador del object
+* @param data           datos del objeto
+* @param size           tamaño del objeto
+* @return 0: Sin errores
+*/
 static int bucket_put_object(const char *bucket_name, const char *key, const unsigned char *data, uint64_t size) {
     char path[512]; bucket_path(bucket_name, path, sizeof(path));
     if (access(path, F_OK) != 0) return -1; /* bucket no existe */
     FILE *f = bucket_open(bucket_name, "r+b");
     if (!f) return -1;
 
-    BucketHeader header;
+    bucketHeader header;
     if (bucket_read_header(f, &header) != 0) { fclose(f); return -1; }
 
     int idx = find_entry_by_key(f, &header, key);
 
     //si el bucket ya tiene objetos, agregar nuevo id al final
     if (idx >= 0) {
-        DirEntry old; bucket_read_entry(f, idx, &old);
+        dirEntry old; bucket_read_entry(f, idx, &old);
 
         if (old.size == size) {
             fseek(f, old.offset, SEEK_SET);
@@ -366,7 +366,7 @@ static int bucket_put_object(const char *bucket_name, const char *key, const uns
         fwrite(data, 1, size, f);
 
         if (free_idx >= 0) {
-            FreeBlock b; bucket_read_free(f, free_idx, &b);
+            freeBlock b; bucket_read_free(f, free_idx, &b);
             b.used = 0; bucket_write_free(f, free_idx, &b);
         }
 
@@ -393,11 +393,11 @@ static int bucket_put_object(const char *bucket_name, const char *key, const uns
     fwrite(data, 1, size, f);
 
     if (free_idx >= 0) {
-        FreeBlock b; bucket_read_free(f, free_idx, &b);
+        freeBlock b; bucket_read_free(f, free_idx, &b);
         b.used = 0; bucket_write_free(f, free_idx, &b);
     }
 
-    DirEntry e; memset(&e, 0, sizeof(e));
+    dirEntry e; memset(&e, 0, sizeof(e));
     strncpy(e.key, key, MAX_KEY_LEN - 1);
     e.offset = offset; e.size = size; e.used = 1;
     bucket_write_entry(f, new_idx, &e);
@@ -408,19 +408,19 @@ static int bucket_put_object(const char *bucket_name, const char *key, const uns
 }
 
 /*
-    * bucket_get_object – Busca y retorna el contenido del object
-    *
-    * @param bucket_name    nombre del bucket donde está el object
-    * @param key            identificador del object
-    * @param out_size       (salida) tamaño del object
-    * @return               data del objeto
-    */
+* bucket_get_object – Busca y retorna el contenido del object
+*
+* @param bucket_name    nombre del bucket donde está el object
+* @param key            identificador del object
+* @param out_size       (salida) tamaño del object
+* @return               data del objeto
+*/
 static unsigned char *bucket_get_object(const char *bucket_name, const char *key, uint64_t *out_size) {
     
     FILE *f = bucket_open(bucket_name, "rb");
     if (!f) return NULL;
 
-    BucketHeader header;
+    bucketHeader header;
     if (bucket_read_header(f, &header) != 0) { fclose(f); return NULL; }
 
     int idx = find_entry_by_key(f, &header, key);
@@ -430,7 +430,7 @@ static unsigned char *bucket_get_object(const char *bucket_name, const char *key
         return NULL;
     }
 
-    DirEntry e; bucket_read_entry(f, idx, &e);
+    dirEntry e; bucket_read_entry(f, idx, &e);
     unsigned char *buffer = malloc(e.size);
     if (!buffer) { 
         fclose(f); 
@@ -456,7 +456,7 @@ int bucket_delete_object(const char *bucket_name, const char *key) {
     FILE *f = bucket_open(bucket_name, "r+b");
     if (!f) return -1;
 
-    BucketHeader header;
+    bucketHeader header;
     if (bucket_read_header(f, &header) != 0) { fclose(f); return -1; }
 
     int idx = find_entry_by_key(f, &header, key);
@@ -465,7 +465,7 @@ int bucket_delete_object(const char *bucket_name, const char *key) {
         fclose(f); return -1;
     }
 
-    DirEntry e; bucket_read_entry(f, idx, &e);
+    dirEntry e; bucket_read_entry(f, idx, &e);
     add_free_block(f, &header, e.offset, e.size);
 
     e.used = 0;
@@ -509,12 +509,12 @@ void bucket_list_objects(const char *bucket_name, const char *prefix) {
     FILE *f = bucket_open(bucket_name, "rb");
     if (!f) return;
 
-    BucketHeader header;
+    bucketHeader header;
     if (bucket_read_header(f, &header) != 0) { fclose(f); return; }
 
     size_t plen = prefix ? strlen(prefix) : 0;
     for (uint32_t i = 0; i < header.max_entries; i++) {
-        DirEntry e; bucket_read_entry(f, i, &e);
+        dirEntry e; bucket_read_entry(f, i, &e);
         if (!e.used) continue;
         if (plen == 0 || strncmp(e.key, prefix, plen) == 0) {
             printf("%10llu  %s\n", (unsigned long long)e.size, e.key);
@@ -523,25 +523,25 @@ void bucket_list_objects(const char *bucket_name, const char *prefix) {
     fclose(f);
 }
 
+/*
+* bucket_remove – Elimina un bucket
+*
+* @param bucket_name    nombre del bucket
+* @param force          (opcional) 1: forzar borrado en caso que el bucket no esté vacío
+* @return               0: Sin errores
+*                       -1: salida con errores
+*                       -2: el bucket tiene objetos (sin force)
+*/
 int bucket_remove(const char *bucket_name, int force) {
-        /*
-    * bucket_delete_object – Elimina un bucket
-    *
-    * @param bucket_name    nombre del bucket
-    * @param force          (opcional) 1: forzar borrado en caso que el bucket no esté vacío
-    * @return               0: Sin errores
-    *                       -1: salida con errores
-    *                       -2: el bucket tiene objetos (sin force)
-    */
     FILE *f = bucket_open(bucket_name, "rb");
     if (!f) return -1;
 
-    BucketHeader header;
+    bucketHeader header;
     if (bucket_read_header(f, &header) != 0) { fclose(f); return -1; }
 
     int has_objects = 0;
     for (uint32_t i = 0; i < header.max_entries && !has_objects; i++) {
-        DirEntry e; bucket_read_entry(f, i, &e);
+        dirEntry e; bucket_read_entry(f, i, &e);
         if (e.used) has_objects = 1;
     }
     fclose(f);
@@ -593,11 +593,11 @@ static void handle_ls(int fd, const char *bucket_name, const char *prefix) {
         FILE *f = fopen(path, "rb");
         if (!f) { send_response(fd, RESP_ERROR, "Bucket no encontrado"); return; }
 
-        BucketHeader h; if (bucket_read_header(f, &h) != 0) { fclose(f); send_response(fd, RESP_ERROR, "Formato de bucket inválido"); return; }
+        bucketHeader h; if (bucket_read_header(f, &h) != 0) { fclose(f); send_response(fd, RESP_ERROR, "Formato de bucket inválido"); return; }
 
         size_t plen = prefix ? strlen(prefix) : 0;
         for (uint32_t i = 0; i < h.max_entries; i++) {
-            DirEntry e; bucket_read_entry(f, i, &e);
+            dirEntry e; bucket_read_entry(f, i, &e);
             if (!e.used) continue;
             if (plen == 0 || strncmp(e.key, prefix, plen) == 0)
                 pos += snprintf(out + pos, sizeof(out) - pos,
@@ -705,7 +705,7 @@ static void handle_rm(int fd, const char *bucket_name, const char *key, int recu
     FILE *f = fopen(path, "r+b");
     if (!f) { send_response(fd, RESP_ERROR, "Bucket no encontrado"); return; }
 
-    BucketHeader h; if (bucket_read_header(f, &h) != 0) { fclose(f); send_response(fd, RESP_ERROR, "Formato inválido"); return; }
+    bucketHeader h; if (bucket_read_header(f, &h) != 0) { fclose(f); send_response(fd, RESP_ERROR, "Formato inválido"); return; }
     fclose(f);
 
     size_t plen = strlen(key);
@@ -714,8 +714,8 @@ static void handle_rm(int fd, const char *bucket_name, const char *key, int recu
         /* re-abrir en modo lectura para obtener la clave */
         FILE *fr = fopen(path, "rb");
         if (!fr) break;
-        BucketHeader htmp; bucket_read_header(fr, &htmp);
-        DirEntry e; bucket_read_entry(fr, i, &e);
+        bucketHeader htmp; bucket_read_header(fr, &htmp);
+        dirEntry e; bucket_read_entry(fr, i, &e);
         fclose(fr);
         if (!e.used) continue;
         if (plen == 0 || strncmp(e.key, key, plen) == 0) {
@@ -771,7 +771,7 @@ static void handle_client(int client_fd) {
     printf("[servidor] cliente conectado (fd=%d)\n", client_fd);
 
     while (1) {
-        MsgHeader hdr;
+        msgHeader hdr;
         int r = net_recv_all(client_fd, &hdr, sizeof(hdr));
         if (r != 0) break; /* cliente desconectado o error */
 
@@ -884,7 +884,10 @@ static void handle_client(int client_fd) {
  * ============================================================ */
 int main(void) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) { perror("socket"); exit(EXIT_FAILURE); }
+    if (server_fd < 0) { 
+        perror("socket");
+        exit(EXIT_FAILURE); 
+    }
 
     /* reutilizar el puerto inmediatamente tras reiniciar el servidor */
     int opt = 1;
@@ -897,10 +900,12 @@ int main(void) {
     addr.sin_port        = htons(SERVER_PORT);
 
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind"); exit(EXIT_FAILURE);
+        perror("bind");
+        exit(EXIT_FAILURE);
     }
     if (listen(server_fd, BACKLOG) < 0) {
-        perror("listen"); exit(EXIT_FAILURE);
+        perror("listen");
+        exit(EXIT_FAILURE);
     }
 
     printf("[servidor] escuchando en puerto %d...\n", SERVER_PORT);
@@ -911,7 +916,10 @@ int main(void) {
         int client_fd = accept(server_fd,
                                (struct sockaddr *)&client_addr,
                                &client_len);
-        if (client_fd < 0) { perror("accept"); continue; }
+        if (client_fd < 0) {
+            perror("accept");
+            continue;
+        }
 
         printf("[servidor] conexión desde %s:%d\n",
                inet_ntoa(client_addr.sin_addr),
