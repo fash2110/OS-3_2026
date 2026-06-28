@@ -287,15 +287,6 @@ static int write_file(const char *path, const unsigned char *data, uint64_t size
     return 0;
 }
 
-/*
- * file_mtime – Devuelve el tiempo de modificación de un archivo,
- * o 0 si no existe.
- */
-static time_t file_mtime(const char *path) {
-    struct stat st;
-    if (stat(path, &st) != 0) return 0;
-    return st.st_mtime;
-}
 
 /* ============================================================
  *  Comandos del cliente
@@ -783,8 +774,34 @@ static int cmd_sync(int argc, char *argv[]) {
 
     /* ---- Caso: local → s3 ---- */
     if (!src_is_s3 && dst_is_s3) {
-        /* Obtener lista de objetos actuales en s3 para detectar extras */
-        /* Recorrer directorio local y subir archivos nuevos/modificados */
+        /*
+         * Paso 1: obtener la lista de objetos actuales en el bucket destino
+         * para poder comparar tamaños y omitir los que no cambiaron.
+         * Guardamos las líneas en un buffer que parsearemos al comparar.
+         */
+        char   *remote_list  = NULL;
+
+        {
+            int fd_ls = connect_to_server();
+            if (fd_ls >= 0) {
+                send_header(fd_ls, CMD_LS, 0, dst_bucket, dst_prefix, NULL, 0);
+                unsigned char *rl = NULL; uint64_t rl_len = 0;
+                int rl_resp = recv_response(fd_ls, &rl, &rl_len);
+                close(fd_ls);
+                if ((rl_resp == RESP_LIST || rl_resp == RESP_OK) && rl) {
+                    remote_list = (char *)rl;
+                } else {
+                    free(rl);
+                }
+            }
+            /* Si falla el LS (bucket aún no existe), remote_list queda NULL
+             * y todos los archivos se subirán igualmente. */
+        }
+
+        /*
+         * Paso 2: recorrer el directorio local y subir solo los archivos
+         * nuevos o cuyo tamaño difiera del objeto remoto correspondiente.
+         */
         char *stack[4096]; int top = 0;
         stack[top++] = strdup(src);
 
@@ -804,7 +821,7 @@ static int cmd_sync(int argc, char *argv[]) {
                 if (is_directory(full)) {
                     if (top < 4095) stack[top++] = strdup(full);
                 } else {
-                    /* Construir clave */
+                    /* Construir clave remota */
                     const char *rel = full + strlen(src);
                     if (*rel == '/') rel++;
                     char key_buf[MAX_KEY_LEN];
@@ -813,17 +830,52 @@ static int cmd_sync(int argc, char *argv[]) {
                     else
                         snprintf(key_buf, sizeof(key_buf), "%s", rel);
 
-                    int fd = connect_to_server();
-                    if (fd < 0) { closedir(d); free(dir); rc = 1; goto sync_done; }
-                    printf("upload: %s to s3://%s/%s\n", full, dst_bucket, key_buf);
-                    if (do_put(fd, full, dst_bucket, key_buf) != 0) rc = 1;
-                    close(fd);
+                    /* Comparar tamaño local con tamaño remoto */
+                    struct stat st_local;
+                    uint64_t local_size = 0;
+                    if (stat(full, &st_local) == 0)
+                        local_size = (uint64_t)st_local.st_size;
+
+                    int skip = 0;
+                    if (remote_list) {
+                        /* Buscar la clave en el listado remoto: "     size  key\n" */
+                        char *scan = remote_list;
+                        while (scan && *scan) {
+                            /* saltar espacios */
+                            while (*scan == ' ') scan++;
+                            /* leer tamaño remoto */
+                            uint64_t rsize = (uint64_t)strtoull(scan, &scan, 10);
+                            /* saltar espacios */
+                            while (*scan == ' ') scan++;
+                            /* leer clave hasta '\n' o '\0' */
+                            char *nl = strchr(scan, '\n');
+                            size_t klen = nl ? (size_t)(nl - scan) : strlen(scan);
+                            if (klen == strlen(key_buf) &&
+                                strncmp(scan, key_buf, klen) == 0) {
+                                if (rsize == local_size) skip = 1;
+                                break;
+                            }
+                            scan = nl ? nl + 1 : NULL;
+                        }
+                    }
+
+                    if (skip) {
+                        printf("skip (sin cambios): %s\n", full);
+                    } else {
+                        int fd = connect_to_server();
+                        if (fd < 0) { closedir(d); free(dir); rc = 1;
+                                      free(remote_list); goto sync_done; }
+                        printf("upload: %s to s3://%s/%s\n", full, dst_bucket, key_buf);
+                        if (do_put(fd, full, dst_bucket, key_buf) != 0) rc = 1;
+                        close(fd);
+                    }
                 }
             }
             closedir(d);
             free(dir);
         }
-        sync_done:;
+        sync_done:
+        free(remote_list);
 
         /* --delete: borrar en s3 lo que no existe localmente */
         if (do_delete) {
@@ -924,11 +976,88 @@ static int cmd_sync(int argc, char *argv[]) {
             }
             line = strtok(NULL, "\n");
         }
-        free(list_data);
+        /* --delete: borrar archivos locales cuya ruta relativa no
+         * aparezca en el listado remoto.  Usamos la misma lista ya
+         * descargada (list_data) — pero strtok la destruyó, así que
+         * necesitamos una copia.  La obtenemos con un segundo LS.    */
+        if (do_delete && !rc) {
+            /* Segundo LS para reconstruir la lista remota intacta */
+            int fd_ls2 = connect_to_server();
+            if (fd_ls2 >= 0) {
+                send_header(fd_ls2, CMD_LS, 0, src_bucket, src_prefix, NULL, 0);
+                unsigned char *rl2 = NULL; uint64_t rl2_len = 0;
+                int rl2_resp = recv_response(fd_ls2, &rl2, &rl2_len);
+                close(fd_ls2);
 
-        /* --delete: borrar archivos locales que no existan en s3 */
-        /* (implementación simplificada: se omite para no exceder complejidad) */
-        (void)do_delete;
+                if ((rl2_resp == RESP_LIST || rl2_resp == RESP_OK) && rl2) {
+                    /* Recorrer el directorio local y borrar huérfanos */
+                    char *del_stack[4096]; int del_top = 0;
+                    del_stack[del_top++] = strdup(dst);
+
+                    while (del_top > 0) {
+                        char *ddir = del_stack[--del_top];
+                        DIR *dd = opendir(ddir);
+                        if (!dd) { free(ddir); continue; }
+
+                        struct dirent *dde;
+                        while ((dde = readdir(dd)) != NULL) {
+                            if (strcmp(dde->d_name, ".") == 0 ||
+                                strcmp(dde->d_name, "..") == 0) continue;
+
+                            char local_full[4096];
+                            snprintf(local_full, sizeof(local_full),
+                                     "%s/%s", ddir, dde->d_name);
+
+                            if (is_directory(local_full)) {
+                                if (del_top < 4095)
+                                    del_stack[del_top++] = strdup(local_full);
+                                continue;
+                            }
+
+                            /* Calcular ruta relativa al dst */
+                            const char *rel = local_full + strlen(dst);
+                            if (*rel == '/') rel++;
+
+                            /* Construir la clave remota esperada */
+                            char expected_key[MAX_KEY_LEN];
+                            if (src_prefix[0])
+                                snprintf(expected_key, sizeof(expected_key),
+                                         "%s/%s", src_prefix, rel);
+                            else
+                                snprintf(expected_key, sizeof(expected_key),
+                                         "%s", rel);
+
+                            /* Buscar la clave en el listado remoto */
+                            int found = 0;
+                            char *scan = (char *)rl2;
+                            while (scan && *scan) {
+                                while (*scan == ' ') scan++;
+                                /* saltar tamaño */
+                                while (*scan && *scan != ' ') scan++;
+                                while (*scan == ' ') scan++;
+                                char *nl = strchr(scan, '\n');
+                                size_t klen = nl ? (size_t)(nl - scan) : strlen(scan);
+                                if (klen == strlen(expected_key) &&
+                                    strncmp(scan, expected_key, klen) == 0) {
+                                    found = 1; break;
+                                }
+                                scan = nl ? nl + 1 : NULL;
+                            }
+
+                            if (!found) {
+                                printf("delete (local huérfano): %s\n", local_full);
+                                remove(local_full);
+                            }
+                        }
+                        closedir(dd);
+                        free(ddir);
+                    }
+                }
+                free(rl2);
+            }
+        }
+
+        free(list_data);
         return rc;
     }
 
