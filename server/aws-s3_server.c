@@ -883,6 +883,8 @@ static void handle_client(int client_fd) {
  *  main – arranca el servidor TCP
  * ============================================================ */
 int main(void) {
+    mkdir(BUCKETS_DIR, 0755);
+
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) { 
         perror("socket");

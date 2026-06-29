@@ -3,6 +3,8 @@
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage[spanish]{babel}
+\usepackage{graphicx}
+\usepackage{booktabs}
 
 \usepackage[top=2.5cm, bottom=2.5cm, left=3cm, right=3cm]{geometry}
 
@@ -103,7 +105,31 @@ La estrategia del programa servidor:
 \end{enumerate}
 Estrategia del programa cliente:
 \begin{enumerate}
-    \item TODO %TODO
+    \item Recibir el comando del usuario por línea de argumentos 
+          (\texttt{argc}, \texttt{argv}) e identificar la operación 
+          solicitada: \texttt{ls}, \texttt{mb}, \texttt{cp}, \texttt{mv}, 
+          \texttt{rm}, \texttt{sync} o \texttt{rb}.
+    \item Analizar los argumentos restantes, parsear las URIs con formato 
+          \texttt{s3://bucket/key} para extraer el nombre del bucket y la 
+          clave del objeto, e identificar las banderas opcionales 
+          (\texttt{--recursive}, \texttt{--delete}, \texttt{--force}).
+    \item Establecer una conexión TCP con el servidor en 
+          \texttt{127.0.0.1:8080} mediante \\ \texttt{connect\_to\_server()}.
+    \item Construir y enviar la cabecera \texttt{msgHeader} seguida del 
+          nombre del bucket, la clave del objeto, una segunda clave 
+          opcional (\textit{key2}) y los datos binarios adjuntos si la 
+          operación lo requiere (por ejemplo, \texttt{cp} local $\to$ S3).
+    \item Recibir la respuesta del servidor mediante 
+          \texttt{recv\_response()}, que retorna el tipo de respuesta 
+          (\texttt{RESP\_OK}, \texttt{RESP\_ERROR}, \texttt{RESP\_DATA}, 
+          \texttt{RESP\_LIST}) junto con los datos adjuntos si los hay.
+    \item Procesar la respuesta: mostrar el resultado al usuario, escribir 
+          archivos locales en caso de descarga, o reportar el error 
+          correspondiente.
+    \item Cerrar la conexión con el servidor. Para operaciones que 
+          requieren múltiples intercambios (como \texttt{sync} o 
+          \texttt{cp --recursive}), se establece una nueva conexión por 
+          cada operación individual.
 \end{enumerate}
 
 \section{Definición de estructuras de datos}
@@ -150,16 +176,34 @@ typedef struct {
     int      used;   // 1 = hueco libre válido, 0 = slot de la lista sin usar
 } freeBlock;
 \end{lstlisting}
-Espacio libre en el contenido del bucket, contiene el offset para su búsqueda directa en la zona de datos, tamaño del espacio libre para identificar si es lo suficientemente grande para el contenido que lo va a reemplazar y un bit que define si es un espacio válido u ocupado. \\
+Espacio libre en el contenido del bucket, contiene el offset para su búsqueda directa en la zona de datos, tamaño del espacio libre para identificar si es lo suficientemente grande para el contenido que lo va a reemplazar y un bit que define si es un espacio válido u ocupado.
+
+\subsubsection{Cliente}
+\begin{lstlisting}
+typedef struct __attribute__((packed)) {
+    uint8_t  cmd;
+    uint8_t  flags;
+    uint16_t bucket_len;
+    uint16_t key_len;
+    uint16_t key2_len;
+    uint64_t data_len;
+} msgHeader;
+\end{lstlisting}
+La estructura \texttt{msgHeader} del cliente es idéntica a la del servidor 
+y debe mantenerse así por diseño: ambos extremos de la comunicación deben 
+interpretar los mismos bytes de la misma forma. El cliente la utiliza 
+exclusivamente para construir y enviar mensajes, mientras que el servidor 
+la utiliza para recibirlos e interpretarlos.
 
 \subsection{Variables globales}
+Para ambos programas de cliente y servidor, se utilizan las mismas variables globales, ya que se requiere la misma configuración para una comunicación exitosa.
 \begin{itemize}
     \item MAX\_KEY\_LEN: Tamaño máximo para nombre de un object
     \item MAX\_ENTRIES: Capacidad máxima de un bucket
     \item MAX\_FREE: Capacidad máxima del espacio libre
-    \item BUCKETS\_DIR: Directorio donde se almacenan los bucket (\texttt{./buckets})
+    \item BUCKETS\_DIR: Directorio donde se almacenan los buckets del lado del servidor (\texttt{./buckets})
     \item SERVER\_PORT: Puerto para recibir mensajes (\texttt{8080})
-    \item BACKLOG: Cantidad de clientes que permite para operaciones secuenciales (\textbf{10})
+    \item BACKLOG: Cantidad de clientes que permite el servidor para operaciones secuenciales (\textbf{10})
     \item enum de comandos de mensajes
     \begin{itemize}
         \item CMD\_LS: 1
@@ -313,16 +357,364 @@ Espacio libre en el contenido del bucket, contiene el offset para su búsqueda d
         \end{itemize}
 \end{itemize}
 
+\subsection*{Cliente}
+\begin{itemize}
+    \item \texttt{main(int argc, char* argv[]) $\to$ int}
+        \begin{itemize}
+            \item Identifica el comando solicitado comparando 
+                  \texttt{argv[1]} contra los comandos disponibles
+            \item Desplaza \texttt{argv} para que cada subcomando reciba 
+                  sus argumentos desde \texttt{argv[0]}
+            \item Delega la ejecución al comando correspondiente e imprime 
+                  el uso correcto si el comando es desconocido
+        \end{itemize}
+
+    \subsection*{Comandos}
+    \item \texttt{cmd\_ls(int argc, char* argv[]) $\to$ int}
+        \begin{itemize}
+            \item Si se provee una URI \texttt{s3://bucket[/prefijo]}, 
+                  lista los objetos del bucket filtrando por prefijo
+            \item Sin argumentos, solicita al servidor la lista de todos 
+                  los buckets disponibles
+        \end{itemize}
+    \item \texttt{cmd\_mb(int argc, char* argv[]) $\to$ int}
+        \begin{itemize}
+            \item Parsea la URI \texttt{s3://bucket} y envía 
+                  \texttt{CMD\_MB} al servidor para crear el bucket
+        \end{itemize}
+    \item \texttt{cmd\_cp(int argc, char* argv[]) $\to$ int}
+        \begin{itemize}
+            \item Determina la dirección de la copia según si los 
+                  argumentos son URIs S3 o rutas locales:
+            \begin{itemize}
+                \item Local $\to$ S3: lee el archivo con 
+                      \texttt{read\_file()} y lo envía con 
+                      \texttt{do\_put()}. Con \texttt{--recursive} 
+                      recorre el directorio con \texttt{opendir()} y 
+                      sube cada archivo manteniendo la ruta relativa 
+                      como clave
+                \item S3 $\to$ local: descarga el objeto con 
+                      \texttt{do\_get()}. Con \texttt{--recursive} 
+                      obtiene primero el listado del bucket y descarga 
+                      cada objeto individualmente
+                \item S3 $\to$ S3: descarga el objeto origen con 
+                      \texttt{CMD\_GET} y lo sube al destino con 
+                      \texttt{CMD\_PUT} en una nueva conexión
+            \end{itemize}
+        \end{itemize}
+    \item \texttt{cmd\_mv(int argc, char* argv[]) $\to$ int}
+        \begin{itemize}
+            \item Local $\to$ S3: reutiliza la lógica de \texttt{cmd\_cp} 
+                  y elimina el archivo local con \texttt{remove()}
+            \item S3 $\to$ local: descarga el objeto con \texttt{do\_get()} 
+                  y lo elimina del bucket con \texttt{CMD\_RM}
+            \item S3 $\to$ S3: envía \texttt{CMD\_MV} con 
+                  \texttt{key2 = "bucket\_dst\textbackslash nkey\_dst"} 
+                  para que el servidor realice la operación atómicamente
+        \end{itemize}
+    \item \texttt{cmd\_rm(int argc, char* argv[]) $\to$ int}
+        \begin{itemize}
+            \item Envía \texttt{CMD\_RM} con la bandera 
+                  \texttt{FLAG\_RECURSIVE} activa si se especifica 
+                  \texttt{--recursive}, eliminando todos los objetos 
+                  cuya clave inicie con el prefijo dado
+        \end{itemize}
+    \item \texttt{cmd\_sync(int argc, char* argv[]) $\to$ int}
+        \begin{itemize}
+            \item Local $\to$ S3: recorre el directorio local y sube 
+                  cada archivo con \texttt{do\_put()}. Con 
+                  \texttt{--delete} obtiene el listado del bucket y 
+                  elimina los objetos remotos que ya no existen localmente
+            \item S3 $\to$ local: obtiene el listado del bucket y 
+                  descarga únicamente los objetos cuyo tamaño difiere 
+                  del archivo local correspondiente, omitiendo los que 
+                  ya están sincronizados
+        \end{itemize}
+    \item \texttt{cmd\_rb(int argc, char* argv[]) $\to$ int}
+        \begin{itemize}
+            \item Envía \texttt{CMD\_RB} con la bandera 
+                  \texttt{FLAG\_FORCE} activa si se especifica 
+                  \texttt{--force}, permitiendo eliminar buckets que 
+                  aún contengan objetos
+        \end{itemize}
+
+    \subsection*{Helpers de red y sistema de archivos}
+    \item \texttt{connect\_to\_server(void) $\to$ int}
+        \begin{itemize}
+            \item Crea un socket TCP y establece la conexión con el 
+                  servidor en \texttt{SERVER\_HOST:SERVER\_PORT}
+            \item Retorna el file descriptor del socket o \texttt{-1} 
+                  en caso de error
+        \end{itemize}
+    \item \texttt{send\_header(int fd, uint8\_t cmd, uint8\_t flags, 
+          char* bucket, char* key, char* key2, uint64\_t data\_len) $\to$ int}
+        \begin{itemize}
+            \item Construye y envía la cabecera \texttt{msgHeader} 
+                  seguida de los campos \texttt{bucket}, \texttt{key} 
+                  y \texttt{key2}, calculando automáticamente las 
+                  longitudes de cada campo
+        \end{itemize}
+    \item \texttt{recv\_response(int fd, unsigned char** out\_data, 
+          uint64\_t* out\_len) $\to$ int}
+        \begin{itemize}
+            \item Lee la cabecera de respuesta del servidor y, si 
+                  \texttt{data\_len > 0}, recibe los datos adjuntos en 
+                  un buffer asignado dinámicamente
+            \item El llamador es responsable de liberar el buffer con 
+                  \texttt{free()}
+        \end{itemize}
+    \item \texttt{do\_put(int fd, char* local, char* bucket, 
+          char* key) $\to$ int}
+        \begin{itemize}
+            \item Lee el archivo local con \texttt{read\_file()}, envía 
+                  la cabecera \texttt{CMD\_PUT} seguida del contenido 
+                  binario y verifica la respuesta del servidor
+        \end{itemize}
+    \item \texttt{do\_get(int fd, char* bucket, char* key, 
+          char* local) $\to$ int}
+        \begin{itemize}
+            \item Envía \texttt{CMD\_GET} y escribe el contenido 
+                  recibido en la ruta local con \texttt{write\_file()}
+            \item Si \texttt{local} es un directorio, construye el 
+                  nombre del archivo usando la parte final de la clave
+        \end{itemize}
+    \item \texttt{parse\_s3\_uri(char* uri, char* bucket, 
+          char* key) $\to$ int}
+        \begin{itemize}
+            \item Divide una URI \texttt{s3://bucket/key} en sus 
+                  componentes \texttt{bucket} y \texttt{key}
+            \item Retorna \texttt{0} si la URI es válida o \texttt{-1} 
+                  si no tiene el prefijo \texttt{s3://}
+        \end{itemize}
+    \item \texttt{read\_file(char* path, uint64\_t* out\_size) 
+          $\to$ unsigned char*}
+        \begin{itemize}
+            \item Lee el contenido completo de un archivo local en un 
+                  buffer dinámico; el llamador debe liberar la memoria 
+                  con \texttt{free()}
+        \end{itemize}
+    \item \texttt{write\_file(char* path, unsigned char* data, 
+          uint64\_t size) $\to$ int}
+        \begin{itemize}
+            \item Escribe datos en una ruta local, creando los 
+                  directorios intermedios necesarios con \texttt{mkdir()}
+        \end{itemize}
+\end{itemize}
+
+\section{Mecanismo de creación de archivos y comunicación con el servidor}
+
+\subsection{Estructura del archivo \texttt{.bkt}}
+Cada bucket se representa como un único archivo binario con extensión 
+\texttt{.bkt} almacenado en el directorio \texttt{./buckets/} del servidor. 
+Al crear un bucket con \texttt{bucket\_create()}, se escribe una estructura 
+fija compuesta por tres zonas contiguas:
+
+\begin{enumerate}
+    \item \textbf{Cabecera} (\texttt{bucketHeader}): ocupa los primeros 
+          bytes del archivo e incluye la firma \texttt{BKT1}, las 
+          capacidades máximas y el offset \texttt{data\_start} que delimita 
+          el inicio de la zona de datos.
+    \item \textbf{Directorio de objetos}: arreglo de \texttt{MAX\_ENTRIES} 
+          entradas \texttt{dirEntry}, cada una inicializada con 
+          \texttt{used=0}. Ocupa \texttt{MAX\_ENTRIES $\times$ 
+          sizeof(dirEntry)} bytes inmediatamente después de la cabecera.
+    \item \textbf{Lista de espacios libres}: arreglo de \texttt{MAX\_FREE} 
+          entradas \texttt{freeBlock}, cada una inicializada con 
+          \texttt{used=0}. Ocupa \texttt{MAX\_FREE $\times$ 
+          sizeof(freeBlock)} bytes a continuación del directorio.
+    \item \textbf{Zona de datos}: región donde se escribe el contenido 
+          binario de los objetos, a partir del offset \texttt{data\_start}.
+\end{enumerate}
+
+\subsection{Algoritmo de asignación de espacio (first-fit)}
+Cuando se almacena un objeto nuevo o se reemplaza uno existente con un 
+tamaño diferente, la función \texttt{allocate\_space()} recorre la lista 
+de \texttt{freeBlock} en orden y selecciona el primer hueco cuyo campo 
+\texttt{size} sea mayor o igual al tamaño requerido. Si no existe ningún 
+hueco suficiente, el objeto se escribe al final del archivo, calculando 
+el offset con \texttt{data\_end\_offset()}. Una vez utilizado un 
+\texttt{freeBlock}, su campo \texttt{used} se marca como \texttt{0} para 
+liberarlo de la lista. Cuando un objeto es eliminado o reemplazado, su 
+espacio se registra como un nuevo \texttt{freeBlock} mediante 
+\texttt{add\_free\_block()}.
+
+\subsection{Protocolo de comunicación cliente-servidor}
+La comunicación se realiza sobre una conexión TCP entre el cliente y el 
+servidor en el puerto \texttt{8080}. Todo intercambio de mensajes sigue 
+el mismo formato:
+
+\begin{enumerate}
+    \item El cliente envía una cabecera fija de 20 bytes 
+          (\texttt{msgHeader}) con el tipo de comando, banderas y las 
+          longitudes de los campos que siguen.
+    \item A continuación envía secuencialmente: el nombre del bucket, la 
+          clave del objeto (\textit{key}), una segunda clave opcional 
+          (\textit{key2}, usada en \texttt{CMD\_MV}), y los datos binarios 
+          adjuntos si \texttt{data\_len > 0}.
+    \item El servidor procesa el comando y responde con otra 
+          \texttt{msgHeader} indicando el resultado 
+          (\texttt{RESP\_OK}, \texttt{RESP\_ERROR}, \texttt{RESP\_DATA} 
+          o \texttt{RESP\_LIST}), seguida de los datos adjuntos si los hay.
+\end{enumerate}
+
+Las funciones \texttt{net\_send\_all()} y \texttt{net\_recv\_all()} 
+garantizan la transmisión completa de cada bloque de bytes, reintentando 
+la llamada al sistema si \texttt{send()} o \texttt{recv()} transfieren 
+menos bytes de los solicitados, lo cual es habitual en sockets TCP. Esto 
+permite transmitir correctamente tanto texto como archivos binarios 
+(imágenes, ejecutables, etc.).
+
 \section{Pruebas}
-TODO
 
 \subsection{Metodología}
-TODO
+Las pruebas fueron realizadas desde un sistema windows utilizando la herramienta de WSL (Windows subsystem for Linux) utilizando la siguiente configuración en la figura \ref{fig:wsl_config}. Primeramente se levanta el servidor utilizando
+\begin{lstlisting}
+    >> cd servidor
+    >> ./aws-s3_server
+\end{lstlisting}
+Una vez se tiene el servidor levantado, se pueden empezar a realizar las pruebas desde el directorio cliente
+\begin{lstlisting}
+    >> cd ..
+    >> cd cliente
+    >> cd pruebas
+    >> ./benchmark.sh
+\end{lstlisting}
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1\linewidth]{WSLconfig.png}
+    \caption{Configuración de la maquina virtual WSL}
+    \label{fig:wsl_config}
+\end{figure}
+
+Se generó un script de pruebas que puede ser encontrado en el repositorio de github en la ubicación \texttt{/cliente/pruebas/benchmark.sh}, dentro del script de pruebas se encuentran las siguientes pruebas de rendimiento en la tabla \ref{tab:pruebas}
+
+\begin{table}[h]
+\caption{Pruebas de rendimiento}
+\label{tab:pruebas}
+\centering
+\begin{tabular}{p{3cm}p{10cm}}
+\toprule
+\textbf{Prueba} & \textbf{Descripción} \\
+\midrule
+\texttt{latencia}        & crear, listar (con y sin bucket) y eliminar bucket \\ \\
+\texttt{subida}          & subida de archivos (10KB, 512KB, 5MB, 20MB) \\ \\
+\texttt{descarga}        & descarga de archivos (S3 $\to$ local) \\ \\
+\texttt{sync}            & sincronización (local $\to$ S3) \\ \\
+\texttt{move + remove}   & mover archivos dentro del bucket, eliminar objeto en el bucket, eliminar objetos recursivamente \\ \\
+\texttt{sobreescritura}  & sobreescribir archivos con mismo y diferente tamaño \\ \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Resultados}
-TODO
+Una vez ejecutado el script de pruebas, se genera un archivo \texttt{/cliente/pruebas/} \texttt{resultados\_benchmark.txt} en el cual se documenta el resultado de las pruebas realizadas, los resultados se pueden visualizar en la tabla \ref{tab:resultados} 
+
+\begin{table}[h]
+\caption{Resultados de pruebas}
+\label{tab:resultados}
+\centering
+\begin{tabular}{p{10cm}p{3cm}}
+\toprule
+\textbf{Prueba} & \textbf{tiempo (ms)} \\
+\midrule
+\texttt{latencia}            & \\
+\texttt{mb}                  & 2 \\
+\texttt{ls (listar buckets)} & 3 \\
+\texttt{ls (listar objetos)} & 2 \\
+\texttt{rb (vacío)}          & 3 \\
+\midrule
+\texttt{subida}             & \\
+\texttt{10 KB}              & 3 \\
+\texttt{512KB}              & 2 \\
+\texttt{5MB}                & 3 \\
+\texttt{20MB}               & 3 \\
+\midrule
+\texttt{descarga}           & \\
+\texttt{10 KB}              & 3 \\
+\texttt{512KB}              & 2 \\
+\texttt{5MB}                & 3 \\
+\texttt{20MB}               & 2 \\
+\midrule
+\texttt{sync}               & \\
+\texttt{10 archivos}        & 2 \\
+\texttt{50 archivos}        & 2 \\
+\texttt{100 archivos}       & 3 \\
+\midrule
+\texttt{move + remove}      & \\
+\texttt{mv (mismo bucket)}  & 2 \\
+\texttt{rm (objeto)}        & 3 \\
+\texttt{rm --recursive}     & 2 \\
+\midrule
+\texttt{sobreescritura}     & \\
+\texttt{mismo tamaño}       & 2 \\
+\texttt{distinto tamaño}    & 2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Se puede visualizar en todas las pruebas que los tiempo de respuesta se centran entre 2 y 3ms, esto se debe en gran parte a que ambos programas cliente y servidor son ejectuados dentro del mismo sistema. En general, los resultados demuestran que la arquitectura de archivo único por bucket con directorio de entradas de tamaño fijo permite tiempos de acceso predecibles y constantes, sin cambios observables al aumentar el tamaño de los objetos, o la cantidad de archivos sincronizados en el entorno de prueba utilizado.
 
 \section{Conclusiones}
-TODO
+\begin{itemize}
+    \item La representación de cada bucket como un único archivo binario 
+          \texttt{.bkt} con una zona de metadatos fija al inicio y una 
+          zona de datos variable al final demostró ser una estrategia 
+          eficaz para simular un sistema de almacenamiento de objetos, 
+          evitando la dependencia del sistema de archivos del sistema 
+          operativo para la organización interna de los objetos. Las 
+          pruebas de latencia base confirmaron esto, con operaciones de 
+          metadatos como \texttt{mb}, \texttt{ls} y \texttt{rb} 
+          completando consistentemente en 2--3 ms.
+
+    \item El uso del atributo \texttt{\_\_attribute\_\_((packed))} en la 
+          estructura \texttt{msgHeader} fue esencial para garantizar que 
+          la cabecera ocupe exactamente 20 bytes en ambos extremos de la 
+          comunicación, eliminando problemas de alineación de memoria que 
+          podrían corromper el protocolo entre cliente y servidor.
+
+    \item El algoritmo \textit{first-fit} implementado en 
+          \texttt{allocate\_space()} permite reutilizar los espacios 
+          liberados por objetos eliminados o reemplazados, evitando el 
+          crecimiento indefinido del archivo \texttt{.bkt}. Las pruebas 
+          de sobreescritura confirmaron que tanto la sustitución de objetos 
+          del mismo tamaño como de distinto tamaño se realizan en 2 ms, 
+          sin diferencia medible entre ambos casos en entorno local. Sin 
+          embargo, el no dividir un bloque libre mayor en dos partes tras 
+          una asignación parcial puede generar fragmentación interna con 
+          el tiempo.
+
+    \item Los tiempos de subida y descarga se mantuvieron estables entre 
+          2 y 3 ms independientemente del tamaño del archivo transferido, 
+          desde 10 KB hasta 20 MB. Dado que las pruebas se ejecutaron con 
+          cliente y servidor en la misma máquina sobre el adaptador de 
+          loopback (\texttt{127.0.0.1}), el factor dominante fue el acceso 
+          a disco y no la latencia de red, lo que indica que el rendimiento 
+          en un entorno de red real podría variar significativamente.
+
+    \item Las pruebas de \texttt{sync} mostraron tiempos consistentes de 
+          2--3 ms al escalar de 10 a 100 archivos, lo que sugiere que el 
+          costo por conexión TCP en entorno local es despreciable. Sin 
+          embargo, dado que \texttt{cmd\_sync()} establece una conexión 
+          independiente por cada archivo, en una red real con latencia 
+          apreciable este comportamiento podría convertirse en un cuello 
+          de botella, siendo una mejora natural el uso de conexiones 
+          persistentes o el envío en grupos.
+
+    \item La separación clara entre el programa cliente y el servidor 
+          permite que el cliente sea una interfaz liviana que únicamente 
+          construye mensajes y presenta resultados, mientras que toda la 
+          lógica de gestión de archivos reside en el servidor, lo que 
+          facilita la extensión futura del sistema.
+
+    \item El servidor atiende clientes de forma secuencial, por lo que 
+          operaciones como \texttt{sync} o \texttt{cp --recursive}, que 
+          requieren múltiples conexiones, son procesadas una a la vez. 
+          Una mejora natural sería introducir concurrencia mediante hilos 
+          o procesos hijos para atender múltiples clientes simultáneamente, 
+          especialmente considerando que las pruebas se realizaron en un 
+          entorno de un único cliente y los tiempos podrían degradarse 
+          considerablemente bajo carga concurrente real.
+\end{itemize}
 
 \end{document}

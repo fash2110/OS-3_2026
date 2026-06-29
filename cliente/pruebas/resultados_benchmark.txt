@@ -1,0 +1,57 @@
+Inicio: Sun Jun 28 16:40:25 CST 2026
+Cliente: ./aws-s3
+
+Generando archivos de prueba...
+  Archivos generados: 10KB, 512KB, 5MB, 20MB
+
+=============================================
+ PRUEBA 1: Latencia de operaciones simples
+=============================================
+--- mb (crear bucket) ---
+  mb: 2 ms
+--- ls (listar buckets) ---
+  ls (sin bucket): 3 ms
+--- ls (listar objetos) ---
+  ls (con bucket): 2 ms
+--- rb (eliminar bucket vacío) ---
+  rb: 3 ms
+
+=============================================
+ PRUEBA 2: Rendimiento de subida (cp local→s3)
+=============================================
+  PUT 10 KB: 3 ms
+  PUT 512 KB: 2 ms
+  PUT 5 MB: 3 ms
+  PUT 20 MB: 3 ms
+
+=============================================
+ PRUEBA 3: Rendimiento de descarga (cp s3→local)
+=============================================
+  GET 10 KB: 3 ms
+  GET 512 KB: 3 ms
+  GET 5 MB: 3 ms
+  GET 20 MB: 2 ms
+
+=============================================
+ PRUEBA 4: Rendimiento de sync (N archivos × 1KB)
+=============================================
+  sync 10 archivos (local→s3): 2 ms
+  sync 50 archivos (local→s3): 2 ms
+  sync 100 archivos (local→s3): 3 ms
+
+=============================================
+ PRUEBA 5: mv y rm
+=============================================
+  mv (mismo bucket): 2 ms
+  rm (objeto único): 3 ms
+  rm --recursive (20 objetos): 2 ms
+
+=============================================
+ PRUEBA 6: Sobrescritura de objeto
+=============================================
+  PUT mismo tamaño (overwrite in-place): 2 ms
+  PUT distinto tamaño (reubicación): 2 ms
+
+Fin: Sun Jun 28 16:40:25 CST 2026
+
+Resultados guardados en: resultados_benchmark.txt
